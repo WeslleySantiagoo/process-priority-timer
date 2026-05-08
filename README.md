@@ -24,14 +24,32 @@ sudo ./init.sh
 
 ### 2. Manualmente (Sem o `init.sh`)
 
-Para usuários que desejem observar diretamente como nosso projeto de otimização funciona "por baixo dos panos" ou para ambientes que não permitem a execução do bash com agilidade, podemos acionar o `main.py` de forma direta e atômica.
+Para configurar o cenário de testes de forma manual (exatamente como o script faz por baixo dos panos), precisamos rodar **ambos** os algoritmos simultaneamente para que compitam pela mesma CPU. É essa competição que força o Kernel a usar o `nice` de fato.
 
-Basta chamar o interpretador Python com super-acessos, já exportando antes do comando nossas duas variáveis chaves (`VALOR_TARGET` – total de iterações do _for loop_, e `TIME_TARGET` – seu tempo limite). É **imprescindível** utilizar o comando `taskset` para fixar a execução em uma CPU específica, garantindo que o algoritmo de balanceamento e monitoramento rode com precisão sem a interferência natural do sistema operacional no escalonamento entre núcleos.
+Basta chamar os interpretadores passando as variáveis vitais (`VALOR_TARGET` e `TIME_TARGET`) e utilizando o **imprescindível** `taskset` para fixar a carga massiva no mesmo núcleo (`-c 0`).
 
 ```bash
-# Executando indicando um alvo de cálculo fútil na ordem dos 990 Milhões para cravarmos a marca de 60 segundos restrito ao núcleo 0 da CPU
+# 1. Primeiro iniciamos o script base original (sem modificações) em segundo plano (&) fixo na CPU 0
+sudo VALOR_TARGET=990000000 taskset -c 0 python3 base-lidiano.py &
+
+# 2. Imediatamente depois, iniciamos o nosso script otimizado para competir matematicamente com o mesmo núcleo
 sudo VALOR_TARGET=990000000 TIME_TARGET=60 taskset -c 0 python3 main.py
 ```
+
+### 👀 Acompanhando a Execução em Tempo Real
+
+Durante a execução (seja via `init.sh` ou manualmente), é altamente recomendado abrir um **terminal dedicado** para observar de perto a mágica acontecendo no sistema operacional. Execute o seguinte comando:
+
+```bash
+watch -n 0.1 ps -C python3 -o psr,pcpu,pid,time,pri,nice
+```
+
+**Como interpretar a saída do comando:**
+
+- A coluna **`PSR`** (Processor) indica em qual CPU o processo está fixado.
+- Você verá que **um dos processos** possui um `PSR` diferente: esse é o nosso **Monitor**, rodando isolado em outra CPU para não atrapalhar os cálculos.
+- Os processos que dividem o **mesmo `PSR`** são as execuções intensivas competindo pela CPU de alvo (a carga original em `base-lidiano.py` e o nosso _Worker_ em `main.py`).
+- A linha onde as colunas **`PRI`** (Prioridade) e **`NI`** (Nice) ficam variando de valor em tempo intermitente reflete perfeitamente a nossa versão otimizada sendo ajustada (_dinamicamente_) pelo monitor ao longo do tempo.
 
 ---
 

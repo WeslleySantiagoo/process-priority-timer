@@ -7,7 +7,7 @@ def funcao(valor_temp):
 
 
 valor = int(
-    os.getenv("VALOR_TARGET", "1000000000")
+    os.getenv("VALOR_TARGET", "990000000")
 )  # Escolher o valor de forma que demore 60s para ser executado
 start = time.time()
 funcao(valor)
