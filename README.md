@@ -1,1 +1,115 @@
-# process-priority-timer
+# Process Priority Timer
+
+Este projeto implementa uma atividade focada na manipulação dinâmica de prioridades de processos em sistemas operacionais.
+
+O objetivo principal é garantir que a execução de um script (que possui uma carga de trabalho intensiva) seja finalizada em um tempo **exato** estipulado (por exemplo, 60 segundos), ajustando automaticamente o índice de gentileza (`nice`) do processo no escalonador de CPU. Essa repriorização se baseia no tempo decorrido, comparando o trabalho concluído com a janela de tempo esperada.
+
+---
+
+## 🚀 Como Executar
+
+O projeto acompanha de forma constante o processo e usa utilitários locais de escalonamento como o `renice`; portanto, a execução **requer privilégios de administrador (sudo)**.
+
+### 1. Utilizando o `init.sh` (Uso Rápido e Prático)
+
+O script bash `init.sh` foi criado como wrapper para facilitar a execução da atividade. Ele cuida do processo de carregar variáveis de ambiente de um arquivo `.env` (se existir) e utiliza o comando `taskset` para isolar e fixar os processos de teste nas CPUs corretas.
+
+Ele roda ambos, o script base do professor (`base-lidiano.py`) e a nossa nova versão (`main.py`) de forma paralela.
+
+**Para rodar via script (Basta executar no terminal):**
+
+```bash
+sudo ./init.sh
+```
+
+### 2. Manualmente (Sem o `init.sh`)
+
+Para usuários que desejem observar diretamente como nosso projeto de otimização funciona "por baixo dos panos" ou para ambientes que não permitem a execução do bash com agilidade, podemos acionar o `main.py` de forma direta e atômica.
+
+Basta chamar o interpretador Python com super-acessos, já exportando antes do comando nossas duas variáveis chaves (`VALOR_TARGET` – total de iterações do _for loop_, e `TIME_TARGET` – seu tempo limite). É **imprescindível** utilizar o comando `taskset` para fixar a execução em uma CPU específica, garantindo que o algoritmo de balanceamento e monitoramento rode com precisão sem a interferência natural do sistema operacional no escalonamento entre núcleos.
+
+```bash
+# Executando indicando um alvo de cálculo fútil na ordem dos 990 Milhões para cravarmos a marca de 60 segundos restrito ao núcleo 0 da CPU
+sudo VALOR_TARGET=990000000 TIME_TARGET=60 taskset -c 0 python3 main.py
+```
+
+---
+
+## 🔍 Entendendo o Funcionamento Interno (`main.py`)
+
+A ideia mestre do `main.py` foi escrita respeitando o paradigma Produtor/Observador (ou Worker/Monitor). Enquanto um sub-processo tem a finalidade **única e bruta** de executar as iterações pesadas em loop, nosso processo _Worker Pai_ atinge a função exclusiva de vigiar se o _Worker Filho_ está adiantado ou atrasado — corrigindo em tempo real pelo Kernel.
+
+Cada etapa detalhada do nosso principal arquivo acompanha os blocos de trechos de códigos a seguir:
+
+### 1. Memória Compartilhada e Início Paralelo
+
+Ao rodarmos o projeto como script principal na chamada do terminal, ele configura os parâmetros e reserva uma área da memória para que um subprocesso avise ao Processo Principal onde o cálculo atual se encontra. Sem conciliar uma _"Shared Memory"_ (`multiprocessing.Value`), o Monitor jamais veria quantos loops o trabalhador executou, já que as memórias de "subprocessos" nativos não colidem ou vazam de uma instância pra outra no Python.
+
+```python
+if __name__ == "__main__":
+    # Leitura inicial das variáveis de ambiente ou instanciar defauts
+    valor_target = int(os.getenv("VALOR_TARGET", "990000000"))
+    time_target = float(os.getenv("TIME_TARGET", "60"))
+
+    # Criamos o ponteiro L (Long integer) para a variável na Shared Memory iniciada como '0'
+    progresso = multiprocessing.Value('L', 0)
+
+    # Abstrai a "funcao" fútil pesada no segundo núcleo de software e roda independentemente
+    p_trabalho = multiprocessing.Process(target=funcao, args=(valor_target, progresso))
+    p_trabalho.start()
+```
+
+### 2. A Carga de Trabalho Pesada (`funcao`)
+
+A função que dita os testes (`funcao`) possui uma alteração muito engenhosa para contornar problemas de _Overhead_ no repasse da Informação de Processo do seu Kernel.
+Se informássemos a variável _progresso_compartilhado_ de UM EM UM salto individual do iterador, gastaríamos quase 50% de desempenho apenas ativando travas (Locks) de escrita, deixando ela devagar. Por isso reportamos e destravamos essa memória apenas a cada pico de tempo.
+
+```python
+def funcao(valor_target, progresso_compartilhado):
+    start_work = time.time()
+    for i in range(valor_target + 1):
+        # Para evitar enchentes e gargalos de Locks com o núcleo principal: O update ocorre apenas a cada cota de Meio Milhão
+        if i % 500000 == 0:
+            progresso_compartilhado.value = i
+
+        # Linha de cálculo Fútil que força a carga à Unidade Central (ALU)
+        _ = i * i
+
+    # Fim da execução limpa
+    progresso_compartilhado.value = valor_target
+```
+
+### 3. O Monitor e Motor de Equilíbrio (`monitor`)
+
+Nosso monitor roda no Processo Pai num _Polling While Loop_. Ele captura o tempo decorrido até aquele milésimo comparado ao andamento anotado até os últimos passos registrados ali, aplicando assim o fator de cálculo percentual que gerará nossa diferença (`diferenca`).
+
+A equação reflete de modo óbvio:
+
+- Se estamos na marca de 15 Segundos Decorridos (Temos que totalizar e finalizar em 60s) = Nossa **Porcentagem de Tempo (perc_tempo) é 25%**
+- Se o Ponto flutuante avisado pelas repetições mostra que o loop está em 300 Milhões (Dentro de 1 Bilhão de chamadas originais) = Nosso **Trabalho está em 30%**
+- A `diferenca` então nos diz: `100 * (30% - 25%)` -> **+5% (Nesse contexto, nós estamos trabalhando Rápido Demais - precisamos acalmar a fila para fechar exatamente cravados aos 60s)**.
+
+```python
+        # Extrair e alinhar as taxas relativas
+        perc_tempo = (elapsed / time_target) * 100
+        perc_trabalho = (atual_iter / valor_target) * 100
+        diferenca = perc_trabalho - perc_tempo
+```
+
+Quando caímos neste caso, o `renice` é ajustado nos blocos abaixo e ativado no sub-processo via terminal pelo Python:
+
+```python
+                if diferenca >= threshold: # Limiar tolerável (1% etc)
+                    if current_nice < 19:
+                        new_nice = current_nice + 1
+                        msg = f"ADIANTADO {diferenca:.2f}%. Aumentando Nice: {current_nice} -> {new_nice}"
+
+                elif diferenca <= -threshold:
+                    if current_nice > -20:
+                        new_nice = current_nice - 1
+                        msg = f"ATRASADO {diferenca:.2f}%. Diminuindo Nice: {current_nice} -> {new_nice}"
+```
+
+**Regras do Escalonador de Prioridade:**
+Para o sistema operacional (sob a semântica da prioridade de gentileza "_Nice_"), ele mapeia limites que englobam a base **-20 (Agressividade e Máxima Prioridade)** aos fundos de **+19 (Muito gentil, aguarde os recursos, atrasando a lógica em favor do SO)**.
+Conforme as lógicas balançam negativamente (Atrasos reais), empurramos um _nice_ violento (-1 até o limite de piso em -20). Se caminharmos acima da pressa esperada sem motivo, incrementamos e cedemos tempo na fila aguardando mais até alcançar +19 (para retardar os acúmulos).
