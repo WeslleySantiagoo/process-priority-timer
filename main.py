@@ -62,11 +62,12 @@ def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cp
         time.sleep(interval)
 
 if __name__ == "__main__":
-    valor_target = int(os.getenv("VALOR_TARGET", "1000000000"))
+    # Fallback para os mesmos valores padrão do init.sh
+    valor_target = int(os.getenv("VALOR_TARGET", "990000000"))
     time_target = float(os.getenv("TIME_TARGET", "60"))
     cpu_monitor = os.getenv("CPU_MONITOR", "1")
-    monitor_interval = float(os.getenv("MONITOR_INTERVAL", "1.0"))
-    monitor_threshold = float(os.getenv("MONITOR_THRESHOLD", "1.0"))
+    monitor_interval = float(os.getenv("MONITOR_INTERVAL", "0.1"))
+    monitor_threshold = float(os.getenv("MONITOR_THRESHOLD", "0.1"))
     
     progresso = multiprocessing.Value('L', 0)
     

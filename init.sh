@@ -57,13 +57,15 @@ else
 	warn "Arquivo .env não encontrado. Usando valores padrão."
 fi
 
-: "${VALOR_TARGET:=1000000000}"
-: "${VALOR_TARGET:=1000000000}"
+: "${VALOR_TARGET:=990000000}"
+: "${TIME_TARGET:=60}"
 : "${BASE_SCRIPT:=base-lidiano.py}"
 : "${MEU_SCRIPT:=main.py}"
 : "${CPU_BASE:=0}"
 : "${CPU_MEU:=0}"
 : "${CPU_MONITOR:=1}"
+: "${MONITOR_INTERVAL:=0.1}"
+: "${MONITOR_THRESHOLD:=0.1}"
 
 # Chamada dos scripts com sudo explícito para garantir permissões de renice
 sudo env VALOR_TARGET="${VALOR_TARGET}" taskset -c "${CPU_BASE}" \
