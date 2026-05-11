@@ -5,14 +5,10 @@ import sys
 
 def funcao(valor_target, progresso_compartilhado):
     """Executa a carga de trabalho e atualiza o progresso em memória compartilhada."""
-    start_work = time.time()
     for i in range(valor_target + 1):
-        if i % 500000 == 0:
-            progresso_compartilhado.value = i
-        _ = i * i
-    progresso_compartilhado.value = valor_target
-    duration = time.time() - start_work
-    print(f"\n[FIM] Seu script (main.py) terminou em: {duration:.2f}s")
+        progresso_compartilhado.value = i
+        z = i * i
+    
 
 def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cpu_monitor, interval, threshold):
     """Monitora o progresso e ajusta o nice do processo de trabalho se necessário."""
@@ -69,9 +65,10 @@ if __name__ == "__main__":
     monitor_interval = float(os.getenv("MONITOR_INTERVAL", "0.1"))
     monitor_threshold = float(os.getenv("MONITOR_THRESHOLD", "0.1"))
     
-    progresso = multiprocessing.Value('L', 0)
+    progresso = multiprocessing.Value('L', 0, lock=False)
     
     p_trabalho = multiprocessing.Process(target=funcao, args=(valor_target, progresso))
+    start_work = time.time()
     p_trabalho.start()
     
     try:
@@ -80,3 +77,5 @@ if __name__ == "__main__":
         pass
     finally:
         p_trabalho.join()
+        duration = time.time() - start_work
+        print(f"\n[FIM] Seu script (main.py) terminou em: {duration:.2f}s")
