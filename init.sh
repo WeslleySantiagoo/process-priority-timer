@@ -75,7 +75,7 @@ PID_BASE=$!
 success "Processo base iniciado: ${BASE_SCRIPT} (PID ${PID_BASE}) na CPU ${CPU_BASE}."
 
 # O main.py agora roda o monitor no seu próprio processo pai
-sudo env VALOR_TARGET="${VALOR_TARGET}" TIME_TARGET="${TIME_TARGET:-60}" \
+sudo nice -n -19 env VALOR_TARGET="${VALOR_TARGET}" TIME_TARGET="${TIME_TARGET:-60}" \
     CPU_MONITOR="${CPU_MONITOR}" MONITOR_INTERVAL="${MONITOR_INTERVAL:-1.0}" \
     MONITOR_THRESHOLD="${MONITOR_THRESHOLD:-1.0}" \
     taskset -c "${CPU_MEU}" python3 "${SCRIPT_DIR}/${MEU_SCRIPT}" &
