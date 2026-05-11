@@ -55,7 +55,7 @@ def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cp
         # O quão adiantado ou atrasado estamos em relação ao tempo que se passou (Trabalho - Tempo)
         diferenca = perc_trabalho - perc_tempo
         
-        print(f"{BLUE}[MONITOR] Tempo: {perc_tempo:.1f}% | Trabalho: {perc_trabalho:.1f}% | Dif: {diferenca:.2f}%{RESET}")
+        print(f"{BLUE}[MONITOR] {elapsed:.2f}s | Tempo: {perc_tempo:.1f}% | Trabalho: {perc_trabalho:.1f}% | Dif: {diferenca:.2f}%{RESET}")
 
         try:
             # Captura o valor de "nice" atual do processo de trabalho chamando o utilitário 'ps'
@@ -75,7 +75,7 @@ def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cp
                 elif diferenca <= -threshold:
                     # Limite máximo de agressividade do Linux é -20. Diminuir o nice = Ganhar prioridade brutal na CPU
                     if current_nice > -20:
-                        new_nice = current_nice - 1
+                        new_nice = current_nice - 5
                         msg = f"ATRASADO {diferenca:.2f}%. Diminuindo Nice: {current_nice} -> {new_nice}"
                 
                 # Se após os cálculos o nice houver sofrido alteração, aplicamos no SO com uso do utilitário 'renice'
