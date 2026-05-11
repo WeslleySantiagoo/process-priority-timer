@@ -3,6 +3,18 @@ import time
 import multiprocessing
 import sys
 
+
+def carregar_env():
+    """Carrega as variáveis de ambiente do arquivo .env."""
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip() and not line.startswith('#'):
+                    key, value = line.strip().split('=', 1)
+                    os.environ[key] = value
+
+
 def funcao(valor_target, progresso_compartilhado):
     """Executa a carga de trabalho e atualiza o progresso em memória compartilhada."""
     for i in range(valor_target + 1):
@@ -59,6 +71,7 @@ def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cp
 
 if __name__ == "__main__":
     # Fallback para os mesmos valores padrão do init.sh
+    carregar_env()
     valor_target = int(os.getenv("VALOR_TARGET", "990000000"))
     time_target = float(os.getenv("TIME_TARGET", "60"))
     cpu_monitor = os.getenv("CPU_MONITOR", "1")
