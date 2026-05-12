@@ -88,6 +88,7 @@ def monitor(pid_trabalho, valor_target, time_target, progresso_compartilhado, cp
         # Pausa o monitor pelo intervalo definido para aliviar a carga da CPU isolada
         time.sleep(interval)
 
+
 if __name__ == "__main__":
     # Carrega variáveis ou insere as métricas padronizadas para nosso objetivo
     carregar_env()
