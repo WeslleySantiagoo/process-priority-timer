@@ -53,98 +53,111 @@ watch -n 0.1 ps -C python3 -o psr,pcpu,pid,time,pri,nice
 
 ---
 
-## 🔍 Entendendo o Funcionamento Interno (`main.py`)
+## 🔍 Linha de Raciocínio e Funcionamento Interno
 
-A ideia mestre do `main.py` foi escrita respeitando o paradigma Produtor/Observador (ou Worker/Monitor). Enquanto um sub-processo tem a finalidade **única e bruta** de executar as iterações pesadas em loop, nosso processo _Worker Pai_ atinge a função exclusiva de vigiar se o _Worker Filho_ está adiantado ou atrasado — corrigindo em tempo real pelo Kernel.
+Dado o objetivo da atividade (terminar a carga de trabalho em aproximadamente 60 segundos controlando a prioridade do processo), nos deparamos com uma série de desafios técnicos de desempenho e concorrência. A arquitetura de solução foi desenvolvida seguindo 7 passos de raciocínio fundamental:
 
-Cada etapa detalhada do nosso principal arquivo acompanha os blocos de trechos de códigos a seguir:
+### 1. Calibragem do Valor Target
 
-### 1. Memória Compartilhada e Início Paralelo
+A premissa básica é colocar um `VALOR_TARGET` tal que a função que faz o trabalho pesado consiga terminar o mais próximo possível de 60s em seu ritmo normal. Esse valor será nosso marco matemático para toda a lógica subsequente.
 
-Ao rodarmos o projeto como script principal na chamada do terminal, ele configura os parâmetros e reserva uma área da memória para que um subprocesso avise ao Processo Principal onde o cálculo atual se encontra. Sem conciliar uma _"Shared Memory"_ (`multiprocessing.Value`), o Monitor jamais veria quantos loops o trabalhador executou, já que as memórias de "subprocessos" nativos não colidem ou vazam de uma instância pra outra no Python.
+### 2. Monitoramento e Diferenças Relativas
 
-```python
-if __name__ == "__main__":
-    # Leitura inicial das variáveis de ambiente ou instanciar defauts
-    valor_target = int(os.getenv("VALOR_TARGET", "990000000"))
-    time_target = float(os.getenv("TIME_TARGET", "60"))
+O coração da atividade é alterar o `nice` do processo de carga, mas como saber se devemos alterar positivamente (ser mais solidário e dar espaço) ou negativamente (ser egoísta e puxar a carga para si)?
+Resolvemos isso com uma função de **Monitor**. Ela verifica o progresso do tempo (decorrido vs limite) e o progresso do trabalho (iteração vs target) em formato percentual. Calculando a diferença entre as duas porcentagens, o monitor decide exatamente para onde direcionar e regular on $\pm$ `nice`.
 
-    # Criamos o ponteiro L (Long integer) para a variável na Shared Memory iniciada como '0'
-    progresso = multiprocessing.Value('L', 0)
+### 3. Isolamento do Monitor
 
-    # Abstrai a "funcao" fútil pesada no segundo núcleo de software e roda independentemente
-    p_trabalho = multiprocessing.Process(target=funcao, args=(valor_target, progresso))
-    p_trabalho.start()
+A função de carga precisa ser altamente eficiente para ficar o mais parecida possível com a base teórica; adicionar qualquer "if" de tempo dentro dela iria aumentar drasticamente as verificações por segundo e prejudicar o desempenho. Pensando nisso, extraímos toda a computação lógica da função principal, e definimos que o Monitor deve ser executado obrigatoriamente **em uma CPU totalmente diferente** do programa da carga (através do comando `taskset`), não prejudicando a performance crua da métrica.
+
+### 4. Memória Compartilhada
+
+Com processos distintos rodando paralelos, surge outro problema: como o monitor irá saber qual o valor da iteração atual para fazer os cálculos isolados?
+Para isso, foi necessário criar uma **variável compartilhada** (`multiprocessing.Value`) entre os processos. A função de carga subscreve e reporta seu progresso nesta memória, o que permite o Monitor ler seu valor ao vivo e tomar as decisões corretamente, calculando o `diferenca`.
+
+### 5. O Impacto Atômico do Compartilhamento
+
+O passo anterior muda levemente a função de sobrecarga original (adicionando a linha `progresso_compartilhado.value = i`). Fica impossível comunicar sem informar iterativamente. Mas isso afeta o desempenho da função? Sim. Acompanhe a dissecação usando a biblioteca `dis` do Python em Nível Atômico (_Bytecode_):
+
+**A antiga função sem a linha:**
+
+```text
+  5           RESUME                   0
+  7           LOAD_GLOBAL              1 (range + NULL)
+              LOAD_FAST                0 (valor_target)
+...
+      L1:     FOR_ITER                 7 (to L2)
+              STORE_FAST               2 (i)
+  9           LOAD_FAST_LOAD_FAST     34 (i, i)
+              BINARY_OP                5 (*)
+...
 ```
 
-### 2. A Carga de Trabalho Pesada (`funcao`)
+**A função com atualização de IPC:**
 
-A função que dita os testes (`funcao`) possui uma alteração muito engenhosa para contornar problemas de _Overhead_ no repasse da Informação de Processo do seu Kernel.
-Se informássemos a variável _progresso_compartilhado_ de UM EM UM salto individual do iterador, gastaríamos quase 50% de desempenho apenas ativando travas (Locks) de escrita, deixando ela devagar. Por isso reportamos e destravamos essa memória apenas a cada pico de tempo.
-
-```python
-def funcao(valor_target, progresso_compartilhado):
-    start_work = time.time()
-    for i in range(valor_target + 1):
-        # Para evitar enchentes e gargalos de Locks com o núcleo principal: O update ocorre apenas a cada cota de Meio Milhão
-        if i % 500000 == 0:
-            progresso_compartilhado.value = i
-
-        # Linha de cálculo Fútil que força a carga à Unidade Central (ALU)
-        _ = i * i
-
-    # Fim da execução limpa
-    progresso_compartilhado.value = valor_target
+```text
+  5           RESUME                   0
+  7           LOAD_GLOBAL              1 (range + NULL)
+              LOAD_FAST                0 (valor_target)
+...
+      L1:     FOR_ITER                13 (to L2)
+              STORE_FAST               2 (i)
+  8           LOAD_FAST_LOAD_FAST     33 (i, progresso_compartilhado)
+              STORE_ATTR               1 (value)
+  9           LOAD_FAST_LOAD_FAST     34 (i, i)
+...
 ```
 
-**Por que atualizar apenas a cada 500.000 iterações?**
+Essa chamada microcópica do `STORE_ATTR` emite instruções adicionais aos iteradores, o que infere um acréscimo temporal natural estimado em cerca de 12.5%(baseasdo em números de linhas a mais). Como o valor target é gigantesco, qualquer pequena instrução dentro do laço altera o final de forma brutal.
 
-Cada acesso à memória compartilhada exige um **Lock** (sincronização do sistema operacional). Se atualizássemos a cada iteração, dos 990 milhões de ciclos, ~99,9% do tempo seria gasto apenas sincronizando locks, perdendo metade do desempenho. Atualizando a cada 500k reduzimos para apenas ~1.980 locks, mantendo precisão suficiente (a cada 100ms, o monitor verifica ~1,65 milhões de iterações e recebe 3-4 atualizações), sem desperdiçar CPU.
+### 6. Destravando Gargalos (Locks)
 
-### 3. O Monitor e Motor de Equilíbrio (`monitor`)
-
-Nosso monitor roda no Processo Pai num _Polling While Loop_. Ele captura o tempo decorrido até aquele milésimo comparado ao andamento anotado até os últimos passos registrados ali, aplicando assim o fator de cálculo percentual que gerará nossa diferença (`diferenca`).
-
-A equação reflete de modo óbvio:
-
-- Se estamos na marca de 15 Segundos Decorridos (Temos que totalizar e finalizar em 60s) = Nossa **Porcentagem de Tempo (perc_tempo) é 25%**
-- Se o Ponto flutuante avisado pelas repetições mostra que o loop está em 300 Milhões (Dentro de 1 Bilhão de chamadas originais) = Nosso **Trabalho está em 30%**
-- A `diferenca` então nos diz: `100 * (30% - 25%)` -> **+5% (Nesse contexto, nós estamos trabalhando Rápido Demais - precisamos acalmar a fila para fechar exatamente cravados aos 60s)**.
+Ao pensar que somente as duas linhas lógicas acrescentariam 12.5% de ônus, a constatação prática surpreendeu com aproximadamente **50% de lentidão a mais**(baseado em teste práticos) comparado com os laços originais que não compartilhavam itens de memória.
+O culpado? O Python embute um bloqueador de acesso (_Lock_) silencioso padrão para garantir que memórias IPC não apresentem leitura ou corrupção cruzada durante a concorrência de núcleo. Esses Locks automáticos sugavam a rapidez do nosso processo pela raiz.
+Por sorte, como neste caso não corremos risco de _Race Conditions_ problemáticos, usamos a funcionalidade mágica nativa de desativar esse lock, mudando a assinatura do recurso compartilhado:
 
 ```python
-        # Extrair e alinhar as taxas relativas
-        perc_tempo = (elapsed / time_target) * 100
-        perc_trabalho = (atual_iter / valor_target) * 100
-        diferenca = perc_trabalho - perc_tempo
+progresso = multiprocessing.Value('L', 0, lock=False)
 ```
 
-Quando caímos neste caso, o `renice` é ajustado nos blocos abaixo e ativado no sub-processo via terminal pelo Python:
+Isso desidratou a perda gerada pelos semáforos e recuperou o desempenho, baixando novamente a defasagem para uma média aceitável de 20%.
 
-```python
-                if diferenca >= threshold: # Limiar tolerável (1% etc)
-                    if current_nice < 19:
-                        new_nice = current_nice + 1
-                        msg = f"ADIANTADO {diferenca:.2f}%. Aumentando Nice: {current_nice} -> {new_nice}"
+### 7. Realizando Competição Plena (A Disputa)
 
-                elif diferenca <= -threshold:
-                    if current_nice > -20:
-                        new_nice = current_nice - 1
-                        msg = f"ATRASADO {diferenca:.2f}%. Diminuindo Nice: {current_nice} -> {new_nice}"
-```
-
-**Regras do Escalonador de Prioridade:**
-Para o sistema operacional (sob a semântica da prioridade de gentileza "_Nice_"), ele mapeia limites que englobam a base **-20 (Agressividade e Máxima Prioridade)** aos fundos de **+19 (Muito gentil, aguarde os recursos, atrasando a lógica em favor do SO)**.
-Conforme as lógicas balançam negativamente (Atrasos reais), empurramos um _nice_ violento (-1 até o limite de piso em -20). Se caminharmos acima da pressa esperada sem motivo, incrementamos e cedemos tempo na fila aguardando mais até alcançar +19 (para retardar os acúmulos).
+Por fim, fica ainda um último impedimento: De que adianta estourar negativamente (dar maior solidariedade, p. ex. um _nice_ entre 0 e 19) se não há tráfego nenhum naquele pino da CPU? Concorrendo com espaço _em branco_, a CPU não vai escalonar ninguém na frente do nosso processamento alvo.
+Para materializar as concorrências que darão sentido à troca de repriorização, chamamos o `init.sh` de modo a iniciar, juntamente e propositalmente na **MESMA CPU**, a função do professor (base). Quando o nice abaixar, o código do professor engolirá o processamento e nosso alvo diminuirá sua velocidade temporariamente.
 
 ---
 
-## 🎯 Conclusão
+## 📊 Arquitetura de Priorização On-the-Fly
 
-Esta atividade demonstra, na prática, como é possível construir uma ponte robusta entre um aplicativo de nível de usuário (nosso script Python) e o nível de núcleo de um sistema operacional. Em resumo, os principais aprendizados foram:
+A representação a seguir (em texto simples) ilustra como ocorre a distribuição física e a comunicação dos processos, provando como garantimos não haver conflitos de processamento do monitor contra os trabalhadores.
 
-1. **Isolamento de CPU (`taskset`):** Vimos como é vital fixar cargas de trabalho para garantir que decisões métricas não sejam falseadas pelos ruídos do escalonador padrão alternando núcleos.
-2. **Memória Compartilhada e Redução de Overhead Locks:** Entendemos que travar recursos é muito "caro" em sistemas computacionais. Compartilhar de forma seletiva (a cada 500mil loops ao invés de a cada 1) protege 99% da performance e fornece amostragem suficiente para a fiscalização.(É o assunto da nossa proxima atividade)
-3. **Padrão Worker / Monitor Dinâmico:** Implementar a lógica de ter quem Trabalha (Gerador do Cálculo) e um Agente Auditor (Monitor) garante que ajustes na prioridade do hardware sejam aplicados a quente (live).
-4. **Política de _Nice/Renice_ Exata:** Com o refinamento feito na taxa percentual (Progresso Trabalhado X Tempo Esvaído), manipulamos matematicamente os graus entre -20 (Máxima Atenção do Processador) e +19 (Sem Pressa e Complacente), fazendo o processo atrasar ou adiantar com uma margem de precisão milimétrica até a cravada de tempo limite esperada.
+```text
++-----------------------------------------------------------------------+
+|                       SISTEMA OPERACIONAL (OS)                        |
++-----------------------------------------------------------------------+
 
-Essa prova de conceito atesta plenamente que com arquitetura assíncrona, inteligência de bloqueio de variáveis e manipulação adequada de sistemas OS, conseguimos forçar o ecossistema a obedecer a métricas estritas com extrema flexibilidade.
+         [ CPU #1 ]                                [ CPU #0 ]
+   Monitoramento Contínuo                     Competição de Carga
+
+ +------------------------+               +------------------------+
+ | Processo Monitor (Pai) |               | Script Base (Oponente) |
+ | (Calcula Dif de Tempo) |               | (Nice Estático: 0)     |
+ +-----------+------------+               +-----------+------------+
+             |                                        ^  (Competem
+             | (Lê estado a                           v   pelo núcleo)
+             v  cada X segs)              +------------------------+
+ [ Memória IPC Lock-Free  ] <---(Avisa)---| Nosso Worker (Filho)   |
+ [ progresso_compartilhado]               | (Nice Dinâmico: ±20)   |
+             |                            +-----------+------------+
+             |                                        ^
+             +----------(Aplica comando 'renice')-----+
+```
+
+**Resumo Visual do Ciclo:**
+
+1. **Ambiente Hostil (CPU 0):** Abriga os dois processos de carga extrema. Eles estão disputando 100% daquele núcleo ativamente.
+2. **Monitoramento Isolado (CPU 1):** O nosso "Pai" (Monitor) fica reservado do lado de fora da arena apenas coletando dados, dessa forma não perde velocidade pelos processamentos matemáticos.
+3. **Leitura Ágil (Shared Memory):** O nosso worker relata seu crescimento (ex.: "loop #3500") pra variável de memória.
+4. **Manipulação "On-the-Fly" (Renice):** O Monitor descobre a defasagem (ex.: "estAMOS ADIANTADOS em 5%"). Dali mesmo atira um comando via Shell limitando/aumentando o nível social do nosso worker na disputa pela **CPU 0**. Isso faz o oponente roubar mais ou menos espaço de máquina no tempo seguinte, regulando em tempo real o momento de linha de chegada.
